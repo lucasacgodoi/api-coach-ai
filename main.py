@@ -9,7 +9,7 @@ wikipedia.set_lang("pt")
 
 app = FastAPI(
     title="IA Coach App API",
-    description="API para auxiliar nos estudos com consulta à Wikipedia.",
+    description="API para auxiliar nos estudos com consulta à Wikipedia de forma amigável.",
     version="1.2.0"
 )
 
@@ -25,52 +25,55 @@ def verify_api_key(x_api_key: str = Header(...)):
 class EnsinarRequest(BaseModel):
     topico: str
 
-# Função para tornar o texto mais amigável
-def humanize_text(summary):
-    # Interações iniciais
-    interactions = [
+# Função para tornar o texto mais amigável e humanizado
+def humanize_text(summary: str) -> str:
+    # Interações iniciais para criar empatia
+    interacoes = [
         "Ótima pergunta! ",
-        "Vamos explorar esse tópico interessante! ",
-        "Deixe-me compartilhar alguns detalhes fascinantes: ",
-        "Prepare-se para uma jornada de conhecimento! "
+        "Vamos explorar esse tópico juntos! ",
+        "Deixe-me compartilhar alguns detalhes interessantes: ",
+        "Que legal! Vou te contar mais sobre isso: "
     ]
     
-    # Adicionar uma interação inicial
-    interaction = random.choice(interactions)
+    # Seleciona uma interação inicial aleatória
+    interacao_inicial = random.choice(interacoes)
     
-    # Simplificar o texto
-    def simplify_text(text):
-        # Dividir o texto em parágrafos
-        paragraphs = text.split('\n')
+    # Função para simplificar o texto:
+    def simplificar_texto(texto: str) -> str:
+        # Divide o texto em parágrafos
+        paragrafos = texto.split('\n')
         
-        # Selecionar os dois primeiros parágrafos
-        if len(paragraphs) > 2:
-            text = '\n'.join(paragraphs[:2])
+        # Pega os dois primeiros parágrafos (ou um, se houver apenas um)
+        if len(paragrafos) >= 2:
+            texto_simplificado = '\n\n'.join(paragrafos[:2])
+        else:
+            texto_simplificado = paragrafos[0]
         
-        # Remover referências e notas
-        text = re.sub(r'\[.*?\]', '', text)
+        # Remove referências, notas e caracteres indesejados
+        texto_simplificado = re.sub(r'\[.*?\]', '', texto_simplificado)
         
-        # Limitar o tamanho
-        if len(text) > 700:
-            text = text[:700] + "..."
+        # Limita o tamanho do texto para garantir clareza (700 caracteres, por exemplo)
+        if len(texto_simplificado) > 700:
+            texto_simplificado = texto_simplificado[:700].rstrip() + "..."
         
-        return text
+        return texto_simplificado.strip()
     
-    simplified_summary = simplify_text(summary)
+    resumo_simplificado = simplificar_texto(summary)
     
-    return interaction + simplified_summary
+    # Retorna o texto final unindo a interação e o resumo simplificado
+    return interacao_inicial + resumo_simplificado
 
 # Endpoint para buscar resumo na Wikipedia
 @app.get("/buscar/{termo}", dependencies=[Depends(verify_api_key)])
 def buscar_wikipedia(termo: str):
     """
-    Busca um termo na Wikipedia, processa o texto e retorna uma versão amigável.
+    Busca um termo na Wikipedia, processa o texto e retorna uma versão amigável e humanizada.
     """
     try:
         # Tenta encontrar a página
         pagina = wikipedia.page(termo)
         
-        # Usa o sumário da página
+        # Usa o sumário da página e humaniza o texto
         texto_humanizado = humanize_text(pagina.summary)
         
         return {
@@ -78,7 +81,7 @@ def buscar_wikipedia(termo: str):
             "resumo": texto_humanizado
         }
     except wikipedia.exceptions.DisambiguationError as e:
-        # Se houver múltiplas possibilidades, retorna a primeira
+        # Se houver múltiplas possibilidades, tenta a primeira opção
         if e.options:
             try:
                 pagina = wikipedia.page(e.options[0])
@@ -87,7 +90,7 @@ def buscar_wikipedia(termo: str):
                     "titulo": pagina.title, 
                     "resumo": texto_humanizado
                 }
-            except:
+            except Exception:
                 raise HTTPException(status_code=404, detail="Tópico não encontrado após desambiguação")
         raise HTTPException(status_code=404, detail="Múltiplas possibilidades encontradas")
     except wikipedia.exceptions.PageError:
@@ -99,13 +102,13 @@ def buscar_wikipedia(termo: str):
 @app.post("/ensinar", dependencies=[Depends(verify_api_key)])
 def ensinar(request: EnsinarRequest):
     """
-    Retorna um conteúdo educativo sobre o tópico solicitado.
+    Retorna um conteúdo educativo e humanizado sobre o tópico solicitado.
     """
     try:
-        # Tenta encontrar a página
+        # Tenta encontrar a página na Wikipedia
         pagina = wikipedia.page(request.topico)
         
-        # Usa o sumário da página
+        # Processa e humaniza o sumário
         texto_humanizado = humanize_text(pagina.summary)
         
         return {
@@ -113,7 +116,7 @@ def ensinar(request: EnsinarRequest):
             "resumo": texto_humanizado
         }
     except wikipedia.exceptions.DisambiguationError as e:
-        # Se houver múltiplas possibilidades, retorna a primeira
+        # Se houver múltiplas opções, tenta a primeira
         if e.options:
             try:
                 pagina = wikipedia.page(e.options[0])
@@ -122,7 +125,7 @@ def ensinar(request: EnsinarRequest):
                     "titulo": pagina.title, 
                     "resumo": texto_humanizado
                 }
-            except:
+            except Exception:
                 raise HTTPException(status_code=404, detail="Tópico não encontrado após desambiguação")
         raise HTTPException(status_code=404, detail="Múltiplas possibilidades encontradas")
     except wikipedia.exceptions.PageError:
