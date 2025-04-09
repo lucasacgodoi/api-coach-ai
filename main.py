@@ -1,29 +1,249 @@
-from fastapi import FastAPI, HTTPException, Depends, Header
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Depends, status, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, EmailStr, validator
+from typing import Optional, Dict, List
+import sqlite3
+import uuid
+import hashlib
+import datetime
+import os
+import json
 import wikipedia
 import random
 import re
 
-# Configure o idioma para português
+# Configurar idioma da Wikipedia para português
 wikipedia.set_lang("pt")
 
-app = FastAPI(
-    title="IA Coach App API",
-    description="API para auxiliar nos estudos com consulta à Wikipedia de forma amigável.",
-    version="1.2.0"
-)
-
-# API Key 
+# API Key original
 API_KEY = "893247589749805674895t980453760894537"
 
-# Função para verificar a API Key
-def verify_api_key(x_api_key: str = Header(...)):
-    if x_api_key != API_KEY:
-        raise HTTPException(status_code=403, detail="API Key inválida")
+app = FastAPI(
+    title="IA Coach API",
+    description="API para autenticação e serviços educacionais do IA Coach",
+    version="1.0.0"
+)
 
-# Models
+# Configurar CORS para permitir conexões do app iOS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Permite todas as origens em ambiente de desenvolvimento
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Configurar banco de dados
+def get_db_connection():
+    conn = sqlite3.connect('iacoach.db')
+    conn.row_factory = sqlite3.Row
+    return conn
+
+# Inicializar o banco de dados
+def init_db():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Criar tabela de usuários se não existir
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL,
+        name TEXT NOT NULL,
+        grade TEXT,
+        age INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    
+    # Criar tabela de sessões se não existir
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS sessions (
+        session_id TEXT PRIMARY KEY,
+        user_id INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (id)
+    )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+# Inicializar o banco de dados quando o servidor é iniciado
+init_db()
+
+# Modelos para as requisições
+class UserRegister(BaseModel):
+    email: EmailStr
+    password: str
+    name: str
+    grade: Optional[str] = None
+    age: Optional[int] = None
+    
+    @validator('password')
+    def password_min_length(cls, v):
+        if len(v) < 6:
+            raise ValueError('A senha deve ter pelo menos 6 caracteres')
+        return v
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
 class EnsinarRequest(BaseModel):
     topico: str
+
+# Função para fazer hash da senha
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+# Endpoints de autenticação
+@app.post("/register", status_code=status.HTTP_201_CREATED)
+async def register_user(user_data: UserRegister):
+    """Registra um novo usuário no sistema"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Verificar se o email já existe
+    cursor.execute("SELECT id FROM users WHERE email = ?", (user_data.email,))
+    if cursor.fetchone():
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Este e-mail já está cadastrado"
+        )
+    
+    # Hash da senha antes de salvar
+    hashed_password = hash_password(user_data.password)
+    
+    # Inserir o novo usuário
+    cursor.execute(
+        "INSERT INTO users (email, password, name, grade, age) VALUES (?, ?, ?, ?, ?)",
+        (user_data.email, hashed_password, user_data.name, user_data.grade, user_data.age)
+    )
+    
+    conn.commit()
+    conn.close()
+    
+    return {"message": "Usuário registrado com sucesso"}
+
+@app.post("/login")
+async def login_user(user_data: UserLogin, response: Response):
+    """Autenticação de usuário"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Hash da senha para comparação
+    hashed_password = hash_password(user_data.password)
+    
+    # Buscar usuário
+    cursor.execute(
+        "SELECT id, email, name, grade, age FROM users WHERE email = ? AND password = ?",
+        (user_data.email, hashed_password)
+    )
+    
+    user_row = cursor.fetchone()
+    
+    if not user_row:
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Email ou senha incorretos"
+        )
+    
+    # Gerar ID de sessão
+    session_id = str(uuid.uuid4())
+    
+    # Salvar sessão
+    cursor.execute(
+        "INSERT INTO sessions (session_id, user_id) VALUES (?, ?)",
+        (session_id, user_row['id'])
+    )
+    
+    conn.commit()
+    conn.close()
+    
+    # Converter o resultado para um dicionário
+    user = dict(user_row)
+    
+    # Definir cookie de sessão
+    response.set_cookie(
+        key="session_id",
+        value=session_id,
+        httponly=True,
+        max_age=7 * 24 * 60 * 60,  # 7 dias
+        samesite="lax"
+    )
+    
+    return {
+        "session_id": session_id,
+        "user": {
+            "id": user["id"],
+            "email": user["email"],
+            "name": user["name"],
+            "grade": user["grade"],
+            "age": user["age"]
+        }
+    }
+
+@app.post("/logout")
+async def logout_user(request: Request, response: Response):
+    """Encerra a sessão do usuário"""
+    session_id = request.cookies.get("session_id")
+    
+    if session_id:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Remover sessão
+        cursor.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+        
+        conn.commit()
+        conn.close()
+        
+        # Remover cookie
+        response.delete_cookie(key="session_id")
+    
+    return {"message": "Logout realizado com sucesso"}
+
+# Middleware de autenticação
+async def get_current_user(request: Request):
+    session_id = request.cookies.get("session_id")
+    
+    if not session_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Não autenticado"
+        )
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Buscar sessão
+    cursor.execute("""
+        SELECT u.id, u.email, u.name, u.grade, u.age
+        FROM sessions s
+        JOIN users u ON s.user_id = u.id
+        WHERE s.session_id = ?
+    """, (session_id,))
+    
+    user_row = cursor.fetchone()
+    conn.close()
+    
+    if not user_row:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Sessão inválida"
+        )
+    
+    return dict(user_row)
+
+# Função para verificar a API Key
+def verify_api_key(api_key: str = Depends(lambda x: x.headers.get("x-api-key"))):
+    if api_key != API_KEY:
+        raise HTTPException(status_code=403, detail="API Key inválida")
+    return api_key
 
 # Função para tornar o texto mais amigável e humanizado
 def humanize_text(summary: str) -> str:
@@ -64,8 +284,8 @@ def humanize_text(summary: str) -> str:
     return interacao_inicial + resumo_simplificado
 
 # Endpoint para buscar resumo na Wikipedia
-@app.get("/buscar/{termo}", dependencies=[Depends(verify_api_key)])
-def buscar_wikipedia(termo: str):
+@app.get("/buscar/{termo}")
+def buscar_wikipedia(termo: str, api_key: str = Depends(verify_api_key)):
     """
     Busca um termo na Wikipedia, processa o texto e retorna uma versão amigável e humanizada.
     """
@@ -99,8 +319,8 @@ def buscar_wikipedia(termo: str):
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
 
 # Endpoint expandido para ensinar sobre um tópico
-@app.post("/ensinar", dependencies=[Depends(verify_api_key)])
-def ensinar(request: EnsinarRequest):
+@app.post("/ensinar")
+def ensinar(request: EnsinarRequest, api_key: str = Depends(verify_api_key)):
     """
     Retorna um conteúdo educativo e humanizado sobre o tópico solicitado.
     """
@@ -135,4 +355,5 @@ def ensinar(request: EnsinarRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 5000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
